@@ -22,19 +22,27 @@ const main = async () => {
     "Enter the full path to the checksum report file (e.g., ./checksum_report.txt): "
   );
   const failedLogPath = path.join(path.dirname(reportPath), "failed.txt");
+  const checkedLogPath = path.join(path.dirname(reportPath), "checked.txt");
   const failedStream = fs.createWriteStream(failedLogPath, {
+    flags: "a",
+  });
+  const checkedStream = fs.createWriteStream(checkedLogPath, {
     flags: "a",
   });
 
   console.log(`Reading checksums from: '${reportPath}'...`);
   console.log(`Failed checksums will be logged to: '${failedLogPath}'`);
+  console.log(`Checked checksums will be logged to: '${checkedLogPath}'`);
 
   // --- File Reading and Parsing ---
-  const checksums = await parseChecksumFile(reportPath);
+  const checkedChecksums = await readCheckedChecksums(checkedLogPath);
+  const checksums = await parseChecksumFile(reportPath, checkedChecksums);
   const totalChecksums = checksums.length;
 
   if (totalChecksums === 0) {
-    console.log("No checksums found in the specified file.");
+    console.log(
+      "No new checksums found in the specified file. All checksums have been checked."
+    );
     return;
   }
 
@@ -54,6 +62,7 @@ const main = async () => {
     if (!response1) {
       // Log only on network/server error for the first request
       failedStream.write(`${checksum}\n`);
+      checkedStream.write(`${checksum}\n`);
       processedCount++;
       updateProgress(processedCount, totalChecksums);
       continue;
@@ -64,6 +73,7 @@ const main = async () => {
     if (!response2) {
       // Log only on network/server error for the second request
       failedStream.write(`${checksum}\n`);
+      checkedStream.write(`${checksum}\n`);
       processedCount++;
       updateProgress(processedCount, totalChecksums);
       continue;
@@ -80,9 +90,11 @@ const main = async () => {
       console.log(`Result: ${JSON.stringify(response1)}`);
       console.log("------------------------------------");
       failedStream.end();
+      checkedStream.end();
       process.exit(0);
     } else {
       // Not a match, but not a network failure. Just update progress.
+      checkedStream.write(`${checksum}\n`);
       processedCount++;
       updateProgress(processedCount, totalChecksums);
     }
@@ -93,6 +105,7 @@ const main = async () => {
     process.stdout.write("\n");
     console.log("Search complete. No matching key was found.");
     failedStream.end();
+    checkedStream.end();
     process.exit(0);
   }
 };
@@ -138,11 +151,37 @@ const submitChecksum = async (checksum) => {
 };
 
 /**
+ * Reads the checked checksums file.
+ * @param {string} filePath - The path to the checked checksums file.
+ * @returns {Promise<Set<string>>} A promise that resolves with a set of checksums.
+ */
+function readCheckedChecksums(filePath) {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(filePath)) {
+      return resolve(new Set());
+    }
+    const checksums = new Set();
+    const stream = fs.createReadStream(filePath);
+    const rl = readline.createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+
+    rl.on("line", (line) => {
+      checksums.add(line.trim());
+    });
+
+    rl.on("close", () => resolve(checksums));
+    rl.on("error", reject);
+  });
+}
+
+/**
  * Reads the checksum report file line by line.
  * @param {string} filePath - The path to the checksum file.
  * @returns {Promise<string[]>} A promise that resolves with an array of checksums.
  */
-function parseChecksumFile(filePath) {
+function parseChecksumFile(filePath, checkedChecksums = new Set()) {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(filePath)) {
       return reject(new Error(`File not found: ${filePath}`));
@@ -158,7 +197,10 @@ function parseChecksumFile(filePath) {
       const parts = line.split(",");
       // Assumes format is "filepath,checksum" and takes the second part.
       if (parts.length === 2 && parts[1]) {
-        checksums.push(parts[1].trim());
+        const checksum = parts[1].trim();
+        if (!checkedChecksums.has(checksum)) {
+          checksums.push(checksum);
+        }
       }
     });
 
